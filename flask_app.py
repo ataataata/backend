@@ -1,10 +1,39 @@
+import os
+import sqlite3
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import sqlite3
-import os
 
 app = Flask(__name__)
-CORS(app)  # Allow cross-origin requests from React frontend
+CORS(app)
+
+DB_FILE = "papers.db"
+
+# Function to ensure database exists
+def initialize_db():
+    """Create the database with sample data if it doesn't exist."""
+    if not os.path.exists(DB_FILE):
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS papers (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            names TEXT,
+            publication_date TEXT,
+            keywords TEXT,
+            abstract TEXT
+        )
+        ''')
+        conn.commit()
+        conn.close()
+        print("Database initialized!")
+
+# Function to get a database connection
+def get_db_connection():
+    initialize_db()  # Ensure the database exists before connecting
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 @app.route("/", methods=["GET"])
 def index():
@@ -28,7 +57,7 @@ def get_papers():
         query += " AND publication_date BETWEEN ? AND ?"
         params.extend([startDate, endDate])
 
-    conn = sqlite3.connect("papers.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(query, params)
     rows = cursor.fetchall()
@@ -38,4 +67,4 @@ def get_papers():
     return jsonify(papers)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=True)
