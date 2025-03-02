@@ -1,1 +1,4 @@
-Flask==2.2.2
+Flask
+flask-cors
+gunicorn
+sqlite3
