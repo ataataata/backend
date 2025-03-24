@@ -8,7 +8,6 @@ CORS(app)
 
 DB_FILE = "papers.db"
 
-# Function to ensure database exists
 def initialize_db():
     """Create the database with sample data if it doesn't exist."""
     if not os.path.exists(DB_FILE):
@@ -20,6 +19,7 @@ def initialize_db():
             title TEXT,
             names TEXT,
             publication_date TEXT,
+            doi TEXT,            -- New column for DOI link
             keywords TEXT,
             abstract TEXT
         )
@@ -28,7 +28,6 @@ def initialize_db():
         conn.close()
         print("Database initialized!")
 
-# Function to get a database connection
 def get_db_connection():
     initialize_db()  # Ensure the database exists before connecting
     conn = sqlite3.connect(DB_FILE)
@@ -61,9 +60,10 @@ def get_papers():
     cursor = conn.cursor()
     cursor.execute(query, params)
     rows = cursor.fetchall()
+    # Use cursor.description to get column names
+    papers = [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
     conn.close()
 
-    papers = [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
     return jsonify(papers)
 
 if __name__ == "__main__":
