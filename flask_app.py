@@ -9,27 +9,28 @@ CORS(app)
 DB_FILE = "papers.db"
 
 def initialize_db():
-    """Create the database with sample data if it doesn't exist."""
+    """Create the database if it doesn't exist."""
     if not os.path.exists(DB_FILE):
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS papers (
-            id TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT,
-            names TEXT,
+            authors TEXT,
+            last_names TEXT,
             publication_date TEXT,
-            doi TEXT,            -- New column for DOI link
+            doi TEXT,
             keywords TEXT,
             abstract TEXT
         )
         ''')
         conn.commit()
         conn.close()
-        print("Database initialized!")
+        print("✅ Database initialized!")
 
 def get_db_connection():
-    initialize_db()  # Ensure the database exists before connecting
+    initialize_db()
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
@@ -40,7 +41,7 @@ def index():
 
 @app.route("/api/papers", methods=["GET"])
 def get_papers():
-    fullName = request.args.get("fullName", "")
+    lastName = request.args.get("lastName", "")
     startDate = request.args.get("startDate", "")
     endDate = request.args.get("endDate", "")
     keywords = request.args.get("keywords", "")
@@ -48,19 +49,23 @@ def get_papers():
     query = "SELECT * FROM papers WHERE 1=1"
     params = []
 
-    if fullName:
-        query += " AND names LIKE ?"
-        params.append(f"%{fullName}%")
+    if lastName:
+        query += " AND last_names LIKE ?"
+        params.append(f"%{lastName}%")
 
     if startDate and endDate:
         query += " AND publication_date BETWEEN ? AND ?"
         params.extend([startDate, endDate])
 
+    if keywords:
+        query += " AND (keywords LIKE ? OR abstract LIKE ?)"
+        keyword_like = f"%{keywords}%"
+        params.extend([keyword_like, keyword_like])
+
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(query, params)
     rows = cursor.fetchall()
-    # Use cursor.description to get column names
     papers = [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
     conn.close()
 
