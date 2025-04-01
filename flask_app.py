@@ -79,21 +79,45 @@ def search_csv():
 
     file = request.files["file"]
     reader = csv.DictReader(TextIOWrapper(file, encoding="utf-8"))
-    last_names = {row.get("Last Name", "").strip().lower() for row in reader if row.get("Last Name", "").strip()}
-
-    if not last_names:
-        return jsonify([])
-
-    query = "SELECT * FROM papers WHERE " + " OR ".join(["LOWER(last_names) LIKE ?"] * len(last_names))
-    params = [f"%{name}%" for name in last_names]
+    all_results = []
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
+
+    for row in reader:
+        name1 = row.get("Last Name", "").strip().lower()
+        name2 = row.get("Owner Last Name", "").strip().lower()
+
+        # Skip if neither name is present
+        if not name1 and not name2:
+            continue
+
+        query = "SELECT * FROM papers WHERE 1=1"
+        params = []
+
+        if name1:
+            query += " AND LOWER(last_names) LIKE ?"
+            params.append(f"%{name1}%")
+        if name2:
+            query += " AND LOWER(last_names) LIKE ?"
+            params.append(f"%{name2}%")
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        all_results.extend([dict(row) for row in rows])
+
     conn.close()
 
-    return jsonify([dict(row) for row in rows])
+    # Optional: remove duplicates by DOI
+    seen = set()
+    unique_results = []
+    for result in all_results:
+        doi = result.get("doi", "")
+        if doi not in seen:
+            seen.add(doi)
+            unique_results.append(result)
+
+    return jsonify(unique_results)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
