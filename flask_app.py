@@ -51,8 +51,9 @@ def get_papers():
     query = "SELECT * FROM papers WHERE 1=1"
     params = []
 
+    # Changed from OR to AND logic for last names
     if last_name_list:
-        query += " AND (" + " OR ".join(["LOWER(last_names) LIKE ?"] * len(last_name_list)) + ")"
+        query += " AND " + " AND ".join(["LOWER(last_names) LIKE ?"] * len(last_name_list))
         params.extend([f"%{name}%" for name in last_name_list])
 
     if startDate and endDate:
@@ -95,10 +96,14 @@ def search_csv():
         query = "SELECT * FROM papers WHERE 1=1"
         params = []
 
-        if name1:
+        # Apply AND logic if both names are present
+        if name1 and name2:
+            query += " AND LOWER(last_names) LIKE ? AND LOWER(last_names) LIKE ?"
+            params.extend([f"%{name1}%", f"%{name2}%"])
+        elif name1:
             query += " AND LOWER(last_names) LIKE ?"
             params.append(f"%{name1}%")
-        if name2:
+        elif name2:
             query += " AND LOWER(last_names) LIKE ?"
             params.append(f"%{name2}%")
 
