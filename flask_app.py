@@ -28,7 +28,6 @@ def initialize_db():
         ''')
         conn.commit()
         conn.close()
-        print("✅ Database initialized!")
 
 def get_db_connection():
     initialize_db()
@@ -86,27 +85,22 @@ def search_csv():
     file = request.files["file"]
     reader = csv.DictReader(TextIOWrapper(file, encoding="utf-8"))
     all_results = []
-
     conn = get_db_connection()
     cursor = conn.cursor()
 
     for row in reader:
-        # Read last names from CSV row
         name1 = row.get("Last Name", "").strip().lower()
         name2 = row.get("Owner Last Name", "").strip().lower()
 
-        # Extract just the date part from "Ordered At"
         ordered_at_raw = row.get("Ordered At", "")
         ordered_date = ordered_at_raw.split(" ")[0] if " " in ordered_at_raw else ""
 
-        # If no CSV last names and no form last names, skip this row
         if not name1 and not name2 and not form_last_names_list:
             continue
 
         query = "SELECT * FROM papers WHERE 1=1"
         params = []
 
-        # Use CSV row last name(s) if available
         if name1 and name2:
             query += " AND LOWER(last_names) LIKE ? AND LOWER(last_names) LIKE ?"
             params.extend([f"%{name1}%", f"%{name2}%"])
@@ -117,17 +111,14 @@ def search_csv():
             query += " AND LOWER(last_names) LIKE ?"
             params.append(f"%{name2}%")
 
-        # Add filtering from form last names if provided
         if form_last_names_list:
             query += " AND " + " AND ".join(["LOWER(last_names) LIKE ?"] * len(form_last_names_list))
             params.extend([f"%{lname}%" for lname in form_last_names_list])
 
-        # Apply date filtering if applicable
         if start_date and end_date and ordered_date:
             query += " AND publication_date BETWEEN ? AND ?"
             params.extend([start_date, end_date])
 
-        # Apply keywords filtering: for each keyword, add a condition
         if keywords_param:
             keyword_list = [kw.strip() for kw in keywords_param.split(",") if kw.strip()]
             for kw in keyword_list:
@@ -140,7 +131,6 @@ def search_csv():
 
     conn.close()
 
-    # Deduplicate results based on DOI
     seen = set()
     unique_results = []
     for result in all_results:
