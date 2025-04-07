@@ -51,7 +51,6 @@ def get_papers():
     query = "SELECT * FROM papers WHERE 1=1"
     params = []
 
-    # Changed from OR to AND logic for last names
     if last_name_list:
         query += " AND " + " AND ".join(["LOWER(last_names) LIKE ?"] * len(last_name_list))
         params.extend([f"%{name}%" for name in last_name_list])
@@ -61,7 +60,6 @@ def get_papers():
         params.extend([startDate, endDate])
 
     if keywords:
-        # For consistency, use the whole string for GET requests
         keyword_like = f"%{keywords.lower()}%"
         query += " AND (LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)"
         params.extend([keyword_like, keyword_like])
@@ -81,16 +79,19 @@ def search_csv():
 
     start_date = request.form.get("startDate", "")
     end_date = request.form.get("endDate", "")
+    form_last_names = request.form.get("lastNames", "").strip().lower()
+    form_last_names_list = [x.strip() for x in form_last_names.split(",") if x.strip()]
+    keywords_param = request.form.get("keywords", "").strip().lower()
 
     file = request.files["file"]
     reader = csv.DictReader(TextIOWrapper(file, encoding="utf-8"))
     all_results = []
-    keywords_param = request.form.get("keywords", "").strip().lower()
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
     for row in reader:
+        # Read last names from CSV row
         name1 = row.get("Last Name", "").strip().lower()
         name2 = row.get("Owner Last Name", "").strip().lower()
 
@@ -98,12 +99,14 @@ def search_csv():
         ordered_at_raw = row.get("Ordered At", "")
         ordered_date = ordered_at_raw.split(" ")[0] if " " in ordered_at_raw else ""
 
-        if not name1 and not name2:
+        # If no CSV last names and no form last names, skip this row
+        if not name1 and not name2 and not form_last_names_list:
             continue
 
         query = "SELECT * FROM papers WHERE 1=1"
         params = []
 
+        # Use CSV row last name(s) if available
         if name1 and name2:
             query += " AND LOWER(last_names) LIKE ? AND LOWER(last_names) LIKE ?"
             params.extend([f"%{name1}%", f"%{name2}%"])
@@ -114,12 +117,17 @@ def search_csv():
             query += " AND LOWER(last_names) LIKE ?"
             params.append(f"%{name2}%")
 
-        # Apply date filtering
+        # Add filtering from form last names if provided
+        if form_last_names_list:
+            query += " AND " + " AND ".join(["LOWER(last_names) LIKE ?"] * len(form_last_names_list))
+            params.extend([f"%{lname}%" for lname in form_last_names_list])
+
+        # Apply date filtering if applicable
         if start_date and end_date and ordered_date:
             query += " AND publication_date BETWEEN ? AND ?"
             params.extend([start_date, end_date])
-        
-        # Apply keywords filtering: split comma-separated keywords and add conditions for each
+
+        # Apply keywords filtering: for each keyword, add a condition
         if keywords_param:
             keyword_list = [kw.strip() for kw in keywords_param.split(",") if kw.strip()]
             for kw in keyword_list:
@@ -132,7 +140,7 @@ def search_csv():
 
     conn.close()
 
-    # Deduplicate by DOI
+    # Deduplicate results based on DOI
     seen = set()
     unique_results = []
     for result in all_results:
