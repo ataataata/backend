@@ -78,6 +78,9 @@ def search_csv():
     if "file" not in request.files:
         return jsonify({"error": "CSV file required"}), 400
 
+    start_date = request.form.get("startDate", "")
+    end_date = request.form.get("endDate", "")
+
     file = request.files["file"]
     reader = csv.DictReader(TextIOWrapper(file, encoding="utf-8"))
     all_results = []
@@ -89,14 +92,16 @@ def search_csv():
         name1 = row.get("Last Name", "").strip().lower()
         name2 = row.get("Owner Last Name", "").strip().lower()
 
-        # Skip if neither name is present
+        # Extract just the date part from "Ordered At"
+        ordered_at_raw = row.get("Ordered At", "")
+        ordered_date = ordered_at_raw.split(" ")[0] if " " in ordered_at_raw else ""
+
         if not name1 and not name2:
             continue
 
         query = "SELECT * FROM papers WHERE 1=1"
         params = []
 
-        # Apply AND logic if both names are present
         if name1 and name2:
             query += " AND LOWER(last_names) LIKE ? AND LOWER(last_names) LIKE ?"
             params.extend([f"%{name1}%", f"%{name2}%"])
@@ -107,13 +112,18 @@ def search_csv():
             query += " AND LOWER(last_names) LIKE ?"
             params.append(f"%{name2}%")
 
+        # Apply date filtering
+        if start_date and end_date and ordered_date:
+            query += " AND publication_date BETWEEN ? AND ?"
+            params.extend([start_date, end_date])
+
         cursor.execute(query, params)
         rows = cursor.fetchall()
         all_results.extend([dict(row) for row in rows])
 
     conn.close()
 
-    # Optional: remove duplicates by DOI
+    # Deduplicate by DOI
     seen = set()
     unique_results = []
     for result in all_results:
