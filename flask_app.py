@@ -84,6 +84,8 @@ def search_csv():
     file = request.files["file"]
     reader = csv.DictReader(TextIOWrapper(file, encoding="utf-8"))
     all_results = []
+    keywords = request.form.get("keywords", "").strip().lower()
+
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -116,6 +118,12 @@ def search_csv():
         if start_date and end_date and ordered_date:
             query += " AND publication_date BETWEEN ? AND ?"
             params.extend([start_date, end_date])
+        
+        if keywords:
+            query += " AND (LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)"
+            keyword_like = f"%{keywords}%"
+            params.extend([keyword_like, keyword_like])
+
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
