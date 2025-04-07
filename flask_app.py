@@ -61,6 +61,7 @@ def get_papers():
         params.extend([startDate, endDate])
 
     if keywords:
+        # For consistency, use the whole string for GET requests
         keyword_like = f"%{keywords.lower()}%"
         query += " AND (LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)"
         params.extend([keyword_like, keyword_like])
@@ -84,8 +85,7 @@ def search_csv():
     file = request.files["file"]
     reader = csv.DictReader(TextIOWrapper(file, encoding="utf-8"))
     all_results = []
-    keywords = request.form.get("keywords", "").strip().lower()
-
+    keywords_param = request.form.get("keywords", "").strip().lower()
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -119,11 +119,12 @@ def search_csv():
             query += " AND publication_date BETWEEN ? AND ?"
             params.extend([start_date, end_date])
         
-        if keywords:
-            query += " AND (LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)"
-            keyword_like = f"%{keywords}%"
-            params.extend([keyword_like, keyword_like])
-
+        # Apply keywords filtering: split comma-separated keywords and add conditions for each
+        if keywords_param:
+            keyword_list = [kw.strip() for kw in keywords_param.split(",") if kw.strip()]
+            for kw in keyword_list:
+                query += " AND (LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)"
+                params.extend([f"%{kw}%", f"%{kw}%"])
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
