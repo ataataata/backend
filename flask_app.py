@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import csv
 import sqlite3
@@ -29,11 +28,14 @@ def initialize_db() -> None:
             abstract         TEXT,
             publication_date TEXT
         )
-    """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_papers_year    ON papers(year)")
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_papers_year ON papers(year)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_papers_journal ON papers(journal)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_papers_last_names ON papers(last_names)")
     conn.commit()
     conn.close()
+
 
 def get_db_connection() -> sqlite3.Connection:
     initialize_db()
@@ -59,11 +61,11 @@ def get_papers():
     params  = []
 
     if last_name_list:
-        clauses.append(" AND ".join(["LOWER(p.last_names) LIKE ?"]*len(last_name_list)))
+        clauses.append(" AND ".join(["LOWER(last_names) LIKE ?"]*len(last_name_list)))
         params.extend([f"%{n}%" for n in last_name_list])
 
     if startDate and endDate:
-        clauses.append("p.publication_date BETWEEN ? AND ?")
+        clauses.append("publication_date BETWEEN ? AND ?")
         params.extend([startDate, endDate])
 
     if term_list:
@@ -71,22 +73,22 @@ def get_papers():
         for _ in term_list:
             pat = f"%{_}%"
             or_parts.append(
-                "(LOWER(p.title) LIKE ? OR LOWER(p.keywords) LIKE ? OR LOWER(p.abstract) LIKE ?)"
+                "(LOWER(title) LIKE ? OR LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)"
             )
             params.extend([pat, pat, pat])
         clauses.append("(" + " OR ".join(or_parts) + ")")
 
     sql = f"""
         SELECT
-            p.pmid               AS id,
-            p.authors            AS names,
-            p.title,
-            p.journal,
-            p.publication_date,
-            p.doi,
-            COALESCE(p.keywords, '')   AS keywords,
-            COALESCE(p.abstract, '')   AS abstract
-        FROM papers p
+            pmid   AS id,
+            authors AS names,
+            title,
+            journal,
+            publication_date AS date,
+            doi,
+            COALESCE(keywords, '')   AS keywords,
+            COALESCE(abstract, '')   AS abstract
+        FROM papers
         WHERE {' AND '.join(clauses)}
         LIMIT 500;
     """
@@ -100,21 +102,21 @@ def get_papers():
 
         if term_list:
             for r in results:
-                tl = r["title"].lower()
-                kl = r["keywords"].lower()
-                al = r["abstract"].lower()
-                matches = sum(1 for term in term_list if term in tl or term in kl or term in al)
-                r["matchPercent"] = round(matches / len(term_list) * 100, 2)
+                matches = sum(
+                    1 for term in term_list
+                    if term in r['title'].lower()
+                    or term in r['keywords'].lower()
+                    or term in r['abstract'].lower()
+                )
+                r['matchPercent'] = round(matches / len(term_list) * 100, 2)
         else:
             for r in results:
-                r["matchPercent"] = 100.0
+                r['matchPercent'] = 100.0
 
-        # sort by percent, then date
-        results.sort(key=lambda r: (r["matchPercent"], r["publication_date"]), reverse=True)
+        results.sort(key=lambda r: (r['matchPercent'], r['date']), reverse=True)
         return jsonify(results)
 
     except Exception as e:
-        print(f"Database error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/search-csv", methods=["POST"])
@@ -122,62 +124,59 @@ def search_csv():
     if "file" not in request.files:
         return jsonify({"error": "CSV file required"}), 400
 
-    start_date       = request.form.get("startDate", "")
-    end_date         = request.form.get("endDate", "")
-    form_lnames_list = [x for x in request.form.get("lastNames", "").split(",") if x.strip()]
-    keywords_param   = request.form.get("keywords", "").strip().lower()
+    start_date     = request.form.get("startDate", "")
+    end_date       = request.form.get("endDate", "")
+    form_lnames    = [x.strip().lower() for x in request.form.get("lastNames","").split(",") if x.strip()]
+    keywords_param = [kw for kw in request.form.get("keywords","").lower().split(",") if kw.strip()]
 
     file   = request.files["file"]
     reader = csv.DictReader(TextIOWrapper(file, encoding="utf-8"))
+    data_rows = []
+    for r in reader:
+        name1 = r.get("Last Name","").strip().lower()
+        name2 = r.get("Owner Last Name","").strip().lower()
+        ord_date = r.get("Ordered At","").split(" ")[0]
+        data_rows.append((name1, name2, ord_date))
 
     conn = get_db_connection()
     cur  = conn.cursor()
-    all_rows = []
 
-    for row in reader:
-        query, params = "SELECT * FROM papers WHERE 1=1", []
+    # Create temp table & bulk insert
+    cur.execute("CREATE TEMP TABLE temp_csv (name1 TEXT, name2 TEXT, ord_date TEXT)")
+    cur.executemany("INSERT INTO temp_csv VALUES (?,?,?)", data_rows)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_temp_name1 ON temp_csv(name1)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_temp_name2 ON temp_csv(name2)")
+    conn.commit()
 
-        name1 = row.get("Last Name", "").strip().lower()
-        name2 = row.get("Owner Last Name", "").strip().lower()
-        if name1 and name2:
-            query += " AND LOWER(last_names) LIKE ? AND LOWER(last_names) LIKE ?"
-            params += [f"%{name1}%", f"%{name2}%"]
-        elif name1:
-            query += " AND LOWER(last_names) LIKE ?"
-            params.append(f"%{name1}%")
-        elif name2:
-            query += " AND LOWER(last_names) LIKE ?"
-            params.append(f"%{name2}%")
+    sql = '''
+      SELECT DISTINCT p.*
+      FROM papers p
+      JOIN temp_csv t ON
+        (t.name1 = '' OR LOWER(p.last_names) LIKE '%' || t.name1 || '%')
+       AND (t.name2 = '' OR LOWER(p.last_names) LIKE '%' || t.name2 || '%')
+      WHERE 1=1
+    '''
+    params = []
 
-        if form_lnames_list:
-            query += " AND " + " AND ".join(["LOWER(last_names) LIKE ?"]*len(form_lnames_list))
-            params += [f"%{ln}%" for ln in form_lnames_list]
+    for ln in form_lnames:
+        sql += " AND LOWER(p.last_names) LIKE ?"
+        params.append(f"%{ln}%")
 
-        ord_raw    = row.get("Ordered At", "")
-        ord_date   = ord_raw.split(" ")[0] if " " in ord_raw else ""
-        if start_date and end_date and ord_date:
-            query += " AND publication_date BETWEEN ? AND ?"
-            params += [start_date, end_date]
+    # date filter
+    if start_date and end_date:
+        sql += " AND p.publication_date BETWEEN ? AND ?"
+        params += [start_date, end_date]
 
-        if keywords_param:
-            kw_list = [kw for kw in keywords_param.split(",") if kw.strip()]
-            for kw in kw_list:
-                query += " AND (LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)"
-                params += [f"%{kw}%", f"%{kw}%"]
+    # keywords filter
+    for kw in keywords_param:
+        sql += " AND (LOWER(p.keywords) LIKE ? OR LOWER(p.abstract) LIKE ?)"
+        params += [f"%{kw}%", f"%{kw}%"]
 
-        cur.execute(query, params)
-        all_rows.extend(cur.fetchall())
-
+    cur.execute(sql, params)
+    rows = cur.fetchall()
     conn.close()
 
-    seen, unique = set(), []
-    for r in all_rows:
-        doi = r["doi"]
-        if doi not in seen:
-            seen.add(doi)
-            unique.append(dict(r))
-
-    return jsonify(unique)
+    return jsonify([dict(r) for r in rows])
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
