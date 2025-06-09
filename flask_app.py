@@ -1,224 +1,232 @@
 import os
 import csv
-import sqlite3
 import re
-from typing import List, Tuple
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import sqlite3
+from datetime import datetime
+from typing import List, Tuple, Optional
 from io import TextIOWrapper
+
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
 DB_FILE = "papers.db"
 
+SURNAME_EXPR = "LOWER(REPLACE(last_names,' ',''))"
+DATE_FMT_SQL = "%Y-%m-%d"
+
+def _last_name(full_name: str) -> str:
+    """
+    Extract the last token from 'First M. Last' or 'Last, First' variants,
+    make it lowercase, and strip inner spaces so 'van der Waals' ➜ 'vanderwaals'.
+    """
+    full_name = full_name.strip()
+    if not full_name:
+        return ""
+    surname = re.split(r"[;,]", full_name)[0].split()[-1].lower()
+    return re.sub(r"\s+", "", surname)
+
+
+def _detect_format(headers: List[str]) -> str:
+    h = {h.lower().strip() for h in headers}
+    if {"last name", "owner last name"} <= h:
+        return "old" 
+    if {"ordered for", "owner"} <= h:
+        return "new"  
+    raise ValueError("CSV does not match a supported format (old/new)")
+
+
+def _to_iso(date_str: str) -> Optional[str]:
+    """Return YYYY-MM-DD for common timestamp styles, else None."""
+    if not date_str:
+        return None
+    date_part = date_str.split()[0]
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_part, fmt).strftime(DATE_FMT_SQL)
+        except ValueError:
+            continue
+    return None
 
 def initialize_db() -> None:
-    """Create the papers table on first run."""
     if os.path.exists(DB_FILE):
         return
-
     conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS papers (
-            pmid             TEXT PRIMARY KEY,
-            title            TEXT,
-            journal          TEXT,
-            year             INTEGER,
-            authors          TEXT,
-            last_names       TEXT,
-            doi              TEXT UNIQUE,
-            keywords         TEXT,
-            abstract         TEXT,
+    cur  = conn.cursor()
+    cur.execute("""
+        CREATE TABLE papers (
+            pmid TEXT PRIMARY KEY,
+            title TEXT,
+            journal TEXT,
+            year INTEGER,
+            authors TEXT,
+            last_names TEXT,              -- comma-separated list of surnames
+            doi TEXT UNIQUE,
+            keywords TEXT,
+            abstract TEXT,
             publication_date TEXT
-        )
-        """
-    )
-
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_papers_year ON papers(year)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_papers_journal ON papers(journal)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_papers_last_names ON papers(last_names)")
-
-    conn.commit()
-    conn.close()
+        );
+    """)
+    cur.execute("CREATE INDEX idx_ln ON papers(last_names)")
+    cur.execute("CREATE INDEX idx_yr ON papers(year)")
+    cur.execute("CREATE INDEX idx_jr ON papers(journal)")
+    conn.commit(); conn.close()
 
 
-def get_db_connection() -> sqlite3.Connection:
+def get_conn() -> sqlite3.Connection:
     initialize_db()
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
-
-def _last_name(full_name: str) -> str:
-    """Return the surname in lower-case, handling commas and extra spaces."""
-    full_name = full_name.strip()
-    if not full_name:
-        return ""
-    full_name = re.split(r"[;,]", full_name)[0]
-    return full_name.split()[-1].lower()
-
-
-def _detect_format(headers: List[str]) -> str:
-    """Identify whether the CSV is the original ("old") or the new format."""
-    lower_headers = {h.lower().strip() for h in headers}
-    if {"last name", "owner last name"} <= lower_headers:
-        return "old"
-    if {"ordered for", "owner"} <= lower_headers:
-        return "new"
-    raise ValueError("CSV does not match a supported format")
-
-
-@app.route("/", methods=["GET"])
-def index():
+@app.route("/")
+def health():
     return jsonify({"status": "API is running"})
 
-
-@app.route("/api/papers", methods=["GET"])
+@app.route("/api/papers")
 def get_papers():
-    lastNames = request.args.get("lastNames", "")
-    startDate = request.args.get("startDate", "")
-    endDate = request.args.get("endDate", "")
-    keywords = request.args.get("keywords", "")
+    lnames = [s.lower().strip() for s in request.args.get("lastNames", "").split(",") if s.strip()]
+    start  = request.args.get("startDate", "")
+    end    = request.args.get("endDate", "")
+    terms  = [s.lower().strip() for s in request.args.get("keywords", "").split(",") if s.strip()]
 
-    last_name_list = [n.strip().lower() for n in lastNames.split(",") if n.strip()]
-    term_list = [kw.strip().lower() for kw in keywords.split(",") if kw.strip()]
+    clauses, params = ["1=1"], []
 
-    clauses: List[str] = ["1=1"]
-    params: List[str] = []
+    if lnames:
+        clauses.append(" AND ".join(
+            [f"','||{SURNAME_EXPR}||',' LIKE '%,'||?||',%'" for _ in lnames]
+        ))
+        params += [ln.replace(" ", "") for ln in lnames]
 
-    if last_name_list:
-        clauses.append(" AND ".join(["LOWER(last_names) LIKE ?"] * len(last_name_list)))
-        params.extend([f"%{n}%" for n in last_name_list])
+    if start and end:
+        clauses.append("publication_date BETWEEN ? AND ?"); params += [start, end]
+    elif start:
+        clauses.append("publication_date >= ?"); params.append(start)
+    elif end:
+        clauses.append("publication_date <= ?"); params.append(end)
 
-    if startDate and endDate:
-        clauses.append("publication_date BETWEEN ? AND ?")
-        params.extend([startDate, endDate])
-
-    if term_list:
-        or_parts: List[str] = []
-        for _ in term_list:
-            pat = f"%{_}%"
-            or_parts.append(
-                "(LOWER(title) LIKE ? OR LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)"
-            )
-            params.extend([pat, pat, pat])
-        clauses.append("(" + " OR ".join(or_parts) + ")")
+    if terms:
+        pattern_sets = []
+        for kw in terms:
+            like = f"%{kw}%"
+            pattern_sets.append("(LOWER(title) LIKE ? OR LOWER(keywords) LIKE ? OR LOWER(abstract) LIKE ?)")
+            params += [like, like, like]
+        clauses.append("(" + " OR ".join(pattern_sets) + ")")
 
     sql = f"""
-        SELECT
-            pmid   AS id,
-            authors AS names,
-            title,
-            journal,
-            publication_date AS date,
-            doi,
-            COALESCE(keywords, '')   AS keywords,
-            COALESCE(abstract, '')   AS abstract
-        FROM papers
-        WHERE {' AND '.join(clauses)}
-        LIMIT 500;
+        SELECT pmid AS id,
+               authors AS names,
+               title,
+               journal,
+               publication_date AS date,
+               doi,
+               COALESCE(keywords,'')  AS keywords,
+               COALESCE(abstract,'')  AS abstract
+        FROM   papers
+        WHERE  {' AND '.join(clauses)}
+        LIMIT  500;
     """
+    conn = get_conn()
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
 
-    try:
-        conn = get_db_connection()
-        rows = conn.execute(sql, params).fetchall()
-        conn.close()
+    res = [dict(r) for r in rows]
 
-        results = [dict(r) for r in rows]
-
-        if term_list:
-            for r in results:
-                matches = sum(
-                    1
-                    for term in term_list
-                    if term in r["title"].lower()
-                    or term in r["keywords"].lower()
-                    or term in r["abstract"].lower()
-                )
-                r["matchPercent"] = round(matches / len(term_list) * 100, 2)
+    for r in res:
+        if terms:
+            m = sum(t in r["title"].lower() or
+                    t in r["keywords"].lower() or
+                    t in r["abstract"].lower()
+                    for t in terms)
+            r["matchPercent"] = round(m / len(terms) * 100, 2)
         else:
-            for r in results:
-                r["matchPercent"] = 100.0
+            r["matchPercent"] = 100.0
 
-        results.sort(key=lambda r: (r["matchPercent"], r["date"]), reverse=True)
-        return jsonify(results)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+    res.sort(key=lambda r: (r["matchPercent"], r["date"]), reverse=True)
+    return jsonify(res)
 
 @app.route("/api/search-csv", methods=["POST"])
 def search_csv():
     if "file" not in request.files:
         return jsonify({"error": "CSV file required"}), 400
 
-    start_date = request.form.get("startDate", "")
-    end_date = request.form.get("endDate", "")
-    form_lnames = [x.strip().lower() for x in request.form.get("lastNames", "").split(",") if x.strip()]
-    keywords_param = [kw for kw in request.form.get("keywords", "").lower().split(",") if kw.strip()]
+    start = request.form.get("startDate", "")
+    end   = request.form.get("endDate", "")
+    ui_ln = [s.lower().strip() for s in request.form.get("lastNames", "").split(",") if s.strip()]
+    kws   = [k.lower().strip() for k in request.form.get("keywords", "").split(",") if k.strip()]
 
-    uploaded = TextIOWrapper(request.files["file"], encoding="utf-8")
-    reader = csv.DictReader(uploaded)
-
+    reader = csv.DictReader(TextIOWrapper(request.files["file"], encoding="utf-8"))
     try:
-        csv_style = _detect_format(reader.fieldnames or [])
-    except ValueError as err:
-        return jsonify({"error": str(err)}), 400
+        style = _detect_format(reader.fieldnames or [])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-    data_rows: List[Tuple[str, str, str]] = []
+    rows: List[Tuple[str, str, str]] = []
+    first_iso: Optional[str] = None
 
     for row in reader:
-        if csv_style == "old":
-            lname1 = row.get("Last Name", "").strip().lower()
-            lname2 = row.get("Owner Last Name", "").strip().lower()
-            odate = row.get("Ordered At", "").split(" ")[0]
-        else:
-            lname1 = _last_name(row.get("Ordered For", ""))
-            lname2 = _last_name(row.get("Owner", ""))
-            odate = row.get("Fulfilled Date", "").split(" ")[0]
+        if style == "old":
+            l1_raw = row.get("Last Name", "").lower().strip()
+            l2_raw = row.get("Owner Last Name", "").lower().strip()
+            date_raw = row.get("Ordered At", "")
+        else:  # "new" export
+            l1_raw = _last_name(row.get("Ordered For", ""))
+            l2_raw = _last_name(row.get("Owner", ""))
+            date_raw = row.get("Fulfilled Date", "")
 
-        data_rows.append((lname1, lname2, odate))
+        l1 = re.sub(r"\s+", "", l1_raw)
+        l2 = re.sub(r"\s+", "", l2_raw)
 
-    conn = get_db_connection()
-    cur = conn.cursor()
+        if not l1 or not l2:
+            continue
 
-    cur.execute("CREATE TEMP TABLE temp_csv (lname1 TEXT, lname2 TEXT, ord_date TEXT)")
-    cur.executemany("INSERT INTO temp_csv VALUES (?,?,?)", data_rows)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_temp_l1 ON temp_csv(lname1)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_temp_l2 ON temp_csv(lname2)")
+        iso = _to_iso(date_raw) or ""
+        if first_iso is None:
+            first_iso = iso
+        rows.append((l1, l2, iso))
+
+    if not rows:
+        return jsonify([])
+
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("CREATE TEMP TABLE temp_csv(l1 TEXT, l2 TEXT, d TEXT)")
+    cur.executemany("INSERT INTO temp_csv VALUES (?,?,?)", rows)
     conn.commit()
 
-    sql = """
+    sql = f"""
         SELECT DISTINCT p.*
-        FROM papers p
-        JOIN temp_csv t
-          ON (t.lname1 = '' OR LOWER(p.last_names) LIKE '%' || t.lname1 || '%')
-         AND (t.lname2 = '' OR LOWER(p.last_names) LIKE '%' || t.lname2 || '%')
-        WHERE 1=1
+        FROM   papers p
+        JOIN   temp_csv t
+               ON (','||{SURNAME_EXPR}||',') LIKE '%,'||t.l1||',%'
+              AND (','||{SURNAME_EXPR}||',') LIKE '%,'||t.l2||',%'
     """
     params: List[str] = []
 
-    for ln in form_lnames:
-        sql += " AND LOWER(p.last_names) LIKE ?"
-        params.append(f"%{ln}%")
+    for ln in ui_ln:
+        sql += f" AND ','||{SURNAME_EXPR}||',' LIKE '%,'||?||',%'"
+        params.append(ln.replace(" ", ""))
 
-    if start_date and end_date:
+    eff_start = start or first_iso or ""
+    if eff_start and end:
         sql += " AND p.publication_date BETWEEN ? AND ?"
-        params += [start_date, end_date]
+        params += [eff_start, end]
+    elif eff_start:
+        sql += " AND p.publication_date >= ?"
+        params.append(eff_start)
+    elif end:
+        sql += " AND p.publication_date <= ?"
+        params.append(end)
 
-    for kw in keywords_param:
+    for kw in kws:
+        like = f"%{kw}%"
         sql += " AND (LOWER(p.keywords) LIKE ? OR LOWER(p.abstract) LIKE ?)"
-        params += [f"%{kw}%", f"%{kw}%"]
+        params += [like, like]
 
-    rows = cur.execute(sql, params).fetchall()
+    out = [dict(r) for r in cur.execute(sql, params).fetchall()]
     conn.close()
-
-    return jsonify([dict(r) for r in rows])
-
+    return jsonify(out)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
