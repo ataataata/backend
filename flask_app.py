@@ -219,14 +219,35 @@ def search_csv():
         sql += " AND p.publication_date <= ?"
         params.append(end)
 
-    for kw in kws:
-        like = f"%{kw}%"
-        sql += " AND (LOWER(p.keywords) LIKE ? OR LOWER(p.abstract) LIKE ?)"
-        params += [like, like]
+    if kws:
+        kw_clauses = []
+        for kw in kws:
+            like = f"%{kw}%"
+            kw_clauses.append("(LOWER(p.keywords) LIKE ? OR LOWER(p.abstract) LIKE ?)")
+            params += [like, like]
+        sql += " AND (" + " OR ".join(kw_clauses) + ")"
 
-    out = [dict(r) for r in cur.execute(sql, params).fetchall()]
+
+    rows = cur.execute(sql, params).fetchall()
     conn.close()
-    return jsonify(out)
+
+    res = [dict(r) for r in rows]
+
+    for r in res:
+        if kws: 
+            m = sum(
+                kw in (r["title"] or "").lower()
+             or kw in (r["keywords"] or "").lower()
+             or kw in (r["abstract"] or "").lower()
+                for kw in kws
+            )
+            r["matchPercent"] = round(m / len(kws) * 100, 2)
+        else:
+            r["matchPercent"] = 0
+
+    res.sort(key=lambda r: (r["matchPercent"], r["publication_date"]), reverse=True)
+
+    return jsonify(res)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
