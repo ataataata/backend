@@ -1,3 +1,4 @@
+#5d3b27e2c0c346a8a94bc8f0a3f40f72
 import os
 import csv
 import re
@@ -5,6 +6,7 @@ import sqlite3
 from datetime import datetime
 from typing import List, Tuple, Optional
 from io import TextIOWrapper
+import json, hmac, hashlib, base64
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -13,6 +15,8 @@ app = Flask(__name__)
 CORS(app)
 
 DB_FILE = "papers.db"
+
+SUB_SALT = "5d3b27e2c0c346a8a94bc8f0a3f40f72"
 
 SURNAME_EXPR = "LOWER(REPLACE(last_names,' ',''))"
 DATE_FMT_SQL = "%Y-%m-%d"
@@ -27,6 +31,10 @@ def _last_name(full_name: str) -> str:
         return ""
     surname = re.split(r"[;,]", full_name)[0].split()[-1].lower()
     return re.sub(r"\s+", "", surname)
+
+def make_token(email: str) -> str:
+    sig = hmac.new(SUB_SALT.encode(), email.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(sig).decode().rstrip("=")
 
 
 def _detect_format(headers: List[str]) -> str:
@@ -248,6 +256,42 @@ def search_csv():
     res.sort(key=lambda r: (r["matchPercent"], r["publication_date"]), reverse=True)
 
     return jsonify(res)
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+@app.post("/api/subscribe")
+def subscribe():
+    data = request.get_json(silent=True) or {}
+    email   = (data.get("email") or "").strip().lower()
+    filters = data.get("filters") 
+
+    if not EMAIL_RE.match(email):
+        return jsonify({"error": "invalid e-mail"}), 400
+    if not filters or not isinstance(filters, dict):
+        return jsonify({"error": "filters must be an object"}), 400
+
+    token = make_token(email)
+
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""INSERT OR REPLACE INTO subscriptions
+                   (email, json_filters, unsub_token)
+                   VALUES (?,?,?)""",
+                (email, json.dumps(filters), token))
+    conn.commit(); conn.close()
+
+    return jsonify({"ok": True, "unsubToken": token})
+
+@app.get("/api/unsubscribe/<token>")
+def unsubscribe(token):
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("DELETE FROM subscriptions WHERE unsub_token=?", (token,))
+    conn.commit(); conn.close()
+
+    return (
+        "<h3>You are unsubscribed</h3>"
+        "<p>If this was a mistake just subscribe again from the site.</p>"
+    ), 200, {"Content-Type": "text/html"}
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
