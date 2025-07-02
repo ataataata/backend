@@ -1,0 +1,15 @@
+sqlite3 papers.db <<'SQL'
+PRAGMA foreign_keys = off;
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    email         TEXT    NOT NULL,
+    json_filters  TEXT    NOT NULL,            -- {"lastNames":"Smith,Brown", ...}
+    last_sent     TEXT    NOT NULL DEFAULT '', -- ISO date, updated after each digest
+    unsub_token   TEXT    NOT NULL UNIQUE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_email ON subscriptions(email);
+
+PRAGMA foreign_keys = on;
+SQL
