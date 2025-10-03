@@ -281,10 +281,52 @@ def subscribe():
 
     return jsonify({"ok": True, "unsubToken": token})
 
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "csv_uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.post("/api/subscribe-csv")
+def subscribe_csv():
+    if "file" not in request.files:
+        return jsonify({"error": "CSV file required"}), 400
+
+    email = (request.form.get("email") or "").strip().lower()
+    if not EMAIL_RE.match(email):
+        return jsonify({"error": "invalid e-mail"}), 400
+
+    tok   = make_token(email)
+    fname = f"{tok}_{int(datetime.utcnow().timestamp())}.csv"
+    file_path = os.path.join(UPLOAD_DIR, fname)
+    request.files["file"].save(file_path)
+
+    kws   = request.form.get("keywords", "")
+    sdate = request.form.get("startDate", "")
+    edate = request.form.get("endDate",  "")
+
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO csv_subscriptions
+               (email, file_path, keywords, start_date, end_date, unsub_token)
+               VALUES (?,?,?,?,?,?)""",
+            (email, file_path, kws, sdate, edate, tok),
+        )
+    return jsonify({"ok": True, "unsubToken": tok})
+
 @app.get("/api/unsubscribe/<token>")
 def unsubscribe(token):
     conn = get_conn(); cur = conn.cursor()
     cur.execute("DELETE FROM subscriptions WHERE unsub_token=?", (token,))
+    cur.execute(
+        "SELECT file_path FROM csv_subscriptions WHERE unsub_token=?",
+        (token,)
+    )
+    for (path,) in cur.fetchall():
+        try:
+            os.remove(path) 
+        except FileNotFoundError:
+            pass
+    cur.execute("DELETE FROM csv_subscriptions WHERE unsub_token=?", (token,))
+
     conn.commit(); conn.close()
 
     return (

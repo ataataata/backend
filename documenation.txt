@@ -1,0 +1,18 @@
+Here are helpful commands that can be used on devolopment for the website:
+
+Frontend:
+To find PID of front-end: sudo ss -lptn 'sport = :3000'
+
+To kill sudo kill -TERM xxx(PID number)
+
+So, if you kill the terminal that runs “npm run start” website would die too, so you can use: “nohup setsid npm start > web.log 2>&1 < /dev/null &” to keep it running on background
+
+
+
+Backend:
+
+To access what is in database thru terminal you can run a command: sqlite3 papers.db 'SELECT * FROM subscriptions;' which will show you everything in subscriptions, right now there is csv_subscriptions, papers, subscriptions
+
+To kill gunicorn, first to locate the PID: ps -fC gunicorn 
+
+To run gunicorn on background (deamon) gunicorn -D -b 0.0.0.0:8000 flask_app:app
